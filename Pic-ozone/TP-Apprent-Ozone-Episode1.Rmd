@@ -1,0 +1,1301 @@
+---
+title: "Modèle de Prévision du Pic d'Ozone"
+subtitle: "Episode I - Stat. descriptives et modèles linéaires"
+date : "4MA - 2023-2024"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth : 4
+    number_sections : true
+---
+
+```{css,echo=F}
+.badCode {
+background-color: #C9DDE4;
+}
+```
+
+```{r setup, echo=FALSE, cache=FALSE,warning=F,message=F}
+library(knitr)
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=TRUE,
+	             cache=FALSE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               class.source="badCode")
+opts_knit$set(width=75)
+```
+
+**Résumé des différents épisodes sur les données Ozone :**
+
+-   Exploration puis modélisation de données climatiques en utilisant R et Python.
+-   L'objectif est de prévoir pour le lendemain un possible dépassement d'un seuil de concentration en ozone à partir d'une prévision déterministe sur un maillage grossier et de variables climatiques locales.
+-   Estimation par différentes méthodes au travers des différents TP : régression linéaire ou logistique, analyse discriminante, arbre de décision, réseau de neurones, agrégation de modèle, SVM.
+-   Comparaison des erreurs de prévision sur un échantillon test puis des courbes ROC. Industrialisation avec le package `caret` et itération sur plusieurs échantillons tests pour analyser la distribution de l'erreur de prévision.
+
+# Introduction
+
+L'objectif, sur ces données, est d'améliorer la prévision déterministe (MOCAGE), calculée par les services de MétéoFrance, de la concentration d'ozone dans certaines stations de prélèvement. Il s'agit d'un problème dit d'adaptation statistique d'une prévision locale de modèles à trop grande échelle en s'aidant d'autres variables également gérées par MétéoFrance, mais à plus petite échelle (température, force du vent...). C'est une première façon de concevoir de l'IA hybride entre un modèle déterministe et un algorithme d'apprentissage automatique. Plus précisément, deux variables peuvent être prévues : soit la concentration quantitative d'ozone, soit le dépassement (qualitatif) d'un certain seuil fixé à 150 $\mu g$. Dans chaque cas, deux approches sont considérées : soit prévoir la concentration quantitative puis en déduire l'éventuel dépassement ou bien prévoir directement le dépassement. Dans le premier cas, il s'agit d'abord d'une régression tandis que dans le deuxième il s'agit d'un problème de discrimination à deux classes ou de régression logistique.
+
+La question posée est donc: quelles sont les meilleures méthodes et stratégies pour prévoir la concentration d'ozone du lendemain d'une part et l'occurrence d'un pic de pollution d'autre part ?
+
+On se propose de tester différentes méthodes durant les différents épisodes : régression logistique, analyse discriminante, réseau de neurones, arbre de décision, agrégation d'arbres (bagging, boosting, random forest), SVM. L'objectif final, à ne pas perdre de vue, est la comparaison de ces méthodes afin de déterminer la plus efficace pour répondre au problème de prévision. Ceci passe par la mise en place d'un protocole très strict afin de s'assurer d'un minimum d'objectivité pour cette comparaison.
+
+Toutes les opérations sont réalisées dans R avec l'appui de bibliothèques complémentaires éventuellement à télécharger :
+
+```{r}
+library(reticulate)
+library(ggplot2)
+library(tidyverse)
+library(gridExtra)
+library(GGally)
+library(plotly)
+# PARTIE 1
+library(corrplot)
+library(reshape2)
+library(FactoMineR) 
+library(factoextra)
+library(glmnet) 
+library(ggfortify)
+library(pROC)
+```
+
+Python conduit à des résultats comparables mais moins complets pour leur interprétation. En particulier, l'absence du type *DataFrame* dans la librairie `scikit-learn` n'autorise pas une sélection fine des variables dans les modèles statistiques usuels. En revanche, l'exécution de la validation croisée Monte Carlo est plus rapide en python.
+
+# Episode I avec R
+
+## Prise en main des données
+
+Les données ont été extraites et mises en forme par le service concerné de Météo France. Elles sont décrites par les variables suivantes :
+
+-   **JOUR** : type de jour ; férié (1) ou pas (0) ;
+-   **O3obs** : concentration d'ozone effectivement observée le lendemain à 17h locales correspondant souvent au maximum de pollution observée ;
+-   **MOCAGE** : prévision de cette pollution obtenue par un modèle déterministe de mécanique des fluides (équation de Navier et Stockes);
+-   **TEMPE** : température prévue par MétéoFrance pour le lendemain 17h ;
+-   **RMH2O** : rapport d'humidité ;
+-   **NO2** : concentration en dioxyde d'azote ;
+-   **NO** : concentration en monoxyde d'azote ;
+-   **STATION** : lieu de l'observation : Aix-en-Provence, Rambouillet, Munchhausen, Cadarache et Plan de Cuques ;
+-   **VentMOD** : force du vent ;
+-   **VentANG** : orientation du vent.
+
+Ce sont des données "propres", sans trous, bien codées et de petites tailles. Elles présentent donc avant tout un caractère pédagogique car permettant de décliner puis comparer toutes les approches de régression et classification supervisée.
+
+Attention: Même si les données sont de qualité, une étude exploratoire préalable est toujours nécessaire pour se familiariser avec les données et les préparer à la phase de modélisation.
+
+On commence par charger les données et vérifier le contenu :
+
+```{r}
+# Lecture des données
+path <- ""
+ozone <- read.table(paste(path, "depSeuil.dat", sep = ""),
+                    sep = ",", header = TRUE)
+# Vérification du contenu
+head(ozone)
+summary(ozone)
+```
+
+Il est nécessaire de bien transformer les variables qualitatives en facteurs sous R
+
+```{r}
+# Changement du type des variables qualitatives en facteur
+ozone[, "JOUR"] <- as.factor(ozone[, "JOUR"])
+ozone[, "STATION"] <- as.factor(ozone[, "STATION"])
+```
+
+Vous pouvez vérifier dans le `summary` du changement de ces variables
+
+```{r}
+summary(ozone)
+```
+
+## Exploration élémentaire
+
+### Statistiques unidimensionnelles
+
+**Question** Précisez la nature des différentes variables
+
+```{r,echo=F,eval=F}
+summary(ozone)
+str(ozone)
+```
+
+Il est nécessaire d'étudier la distribution des différentes variables. Notez la symétrie ou non de celles-ci.
+
+```{r}
+g1<-ggplot(ozone,aes(x=O3obs))+
+  geom_histogram(aes(y=..density..))+
+  geom_density(alpha=.2,col="blue") 
+g2<-ggplot(ozone,aes(x=NO2))+
+  geom_histogram(aes(y=..density..))+
+  geom_density(alpha=.2,col="blue") 
+
+grid.arrange(g1,g2,ncol=2)
+```
+
+```{r}
+# Même chose pour les autres variables
+g3<-ggplot(ozone,aes(x=MOCAGE))+geom_histogram(aes(y=..density..))+geom_density(alpha=.2, col="blue") 
+g4<-ggplot(ozone,aes(x=TEMPE))+geom_histogram(aes(y=..density..))+geom_density(alpha=.2, col="blue") 
+g5<-ggplot(ozone,aes(x=RMH2O))+geom_histogram(aes(y=..density..))+geom_density(alpha=.2, col="blue") 
+g6<-ggplot(ozone,aes(x=NO))+geom_histogram(aes(y=..density..))+geom_density(alpha=.2, col="blue") 
+g7<-ggplot(ozone,aes(x=VentMOD))+geom_histogram(aes(y=..density..))+geom_density(alpha=.2, col="blue") 
+g8<-ggplot(ozone,aes(x=VentANG))+geom_histogram(aes(y=..density..))+geom_density(alpha=.2, col="blue") 
+
+grid.arrange(g3,g4,g5,g6,g7,g8,ncol=3)
+```
+
+### Transformations de variables
+
+Des transformations sont proposées pour rendre certaines distributions plus symétriques et ainsi plus "gaussiennes". C'est nécessaire pour certaines méthodes à venir de modélisation (linéaires), pas pour toutes (arbres).
+
+```{r}
+ozone[, "SRMH2O"] <- sqrt(ozone[, "RMH2O"])
+ozone[, "LNO2"] <- log(ozone[, "NO2"])
+ozone[, "LNO"] <- log(ozone[, "NO"])
+```
+
+**Question** Vérifiez l'opportunité de ces transformations puis retirez les variables initiales
+
+```{r}
+# A COMPLETER
+# Vérification de l'opportunité des transformations
+g9 <- ggplot(ozone, aes(x = SRMH2O)) +
+  geom_histogram(aes(y = ..density..)) +
+  geom_density(alpha = 0.2, col = "blue") +
+  labs(title = "Distribution de SRMH2O")
+
+g10 <- ggplot(ozone, aes(x = LNO2)) +
+  geom_histogram(aes(y = ..density..)) +
+  geom_density(alpha = 0.2, col = "blue") +
+  labs(title = "Distribution de LNO2")
+
+g11 <- ggplot(ozone, aes(x = LNO)) +
+  geom_histogram(aes(y = ..density..)) +
+  geom_density(alpha = 0.2, col = "blue") +
+  labs(title = "Distribution de LNO")
+
+# Affichage des objets ggplot dans une grille
+grid.arrange(g9, g10, g11, ncol = 3)
+
+# Retirer les variables initiales
+ozone <- ozone[, c(1:4, 8:13)]
+
+```
+
+On construit maintenant la variable de dépassement de seuil `DepSeuil` (O3obs \>150) pour obtenir le fichier qui sera effectivement utilisé par la suite.
+
+```{r}
+ozone[, "DepSeuil"] <- as.factor(ozone[, "O3obs"] > 150)
+summary(ozone)
+```
+
+### Corrélations
+
+```{r}
+ggpairs(ozone[, c(2:4, 6:10)])
+```
+
+**Question** Que dire sur les relations des variables 2 à 2 ?
+
+**Question** Complétez en visualisant les corrélations avec la fonction `corrplot()` (package `corrplot`). Quelle est la limite de ce type de diagnostic numérique : quel type de corrélation est mesuré ?
+
+```{r,echo=F}
+corrplot(cor(ozone[, c(2:4, 6:10)]),method="ellipse")
+```
+
+### ACP
+
+Les commandes suivantes permettent de réaliser une analyse en composantes principales sur les seules variables quantitatives. Par ailleurs la variable à modéliser (O3obs, concentration observée) n'est pas utilisée.
+
+```{r}
+# ACP réduite
+library(FactoMineR)
+acp <- PCA(ozone[, c(11,2:4, 6:10)], scale.unit = TRUE,
+           graph = FALSE, quali.sup = 1, quanti.sup = 2, ncp = 7)
+# Décroissance des valeurs propres
+library(factoextra)
+g1<-fviz_eig(acp, addlabels = TRUE, ylim = c(0, 40))
+library(reshape2)
+g2<-ggplot(melt(acp$ind$coord),aes(x=Var2,y=value))+
+  geom_boxplot()+
+  xlab("")
+grid.arrange(g1,g2,ncol=2)
+
+corrplot(acp$var$cor, is.corr=FALSE,method="ellipse")
+```
+
+**Question** Que représentent ces graphiques ?
+
+Le premier graphique représente la décroissance des valeurs propres. Les valeurs propres mesurent la quantité de variance expliquée par chaque composante principale. Ce graphique permet de déterminer le nombre de dimensions principales significatives à conserver dans l'analyse.
+
+Le deuxième graphique montre les coordonnées des individus sur les composantes principales sous forme de boxplots. Il permet de visualiser la répartition des individus sur chaque dimension et d'identifier les valeurs atypiques.
+
+Le troisième graphique représente la structure de corrélation des variables avec les axes de l'ACP. Il met en évidence les corrélations entre les variables et les composantes principales, ce qui aide à interpréter la signification des dimensions de l'ACP.
+
+**Question** Que dire du choix du nombre de dimensions, des valeurs atypiques ?
+Le choix du nombre de dimensions à conserver peut être basé sur le critère de la décroissance des valeurs propres. Dans le premier graphique, on cherche un point d'inflexion où la pente devient moins abrupte, ce qui indique un nombre approprié de dimensions principales à conserver.
+
+Les valeurs atypiques dans le deuxième graphique peuvent indiquer des individus qui se comportent de manière anormale par rapport à la majorité des autres individus. Elles peuvent avoir un impact sur la validité de l'analyse et devraient être examinées de plus près pour déterminer si elles sont des erreurs ou des observations légitimes mais inhabituelles.
+
+**Question** Que dire de la structure de corrélation des variables ? Est-elle intuitive ?
+La structure de corrélation des variables, représentée dans le troisième graphique, montre comment chaque variable est corrélée avec les composantes principales de l'ACP. Une corrélation élevée entre une variable et une composante principale indique que cette variable contribue fortement à cette dimension de l'ACP.
+
+Pour déterminer si la structure de corrélation est intuitive, il est nécessaire d'examiner si les variables qui sont corrélées entre elles dans les graphiques sont logiquement liées dans le contexte du problème étudié. Cela peut nécessiter une compréhension approfondie du domaine d'application des données.
+
+```{r}
+fviz_pca_var(acp)
+fviz_pca_ind(acp,col.ind="contrib",label="none",gradient.cols = c("white", "#2E9FDF", "#FC4E07" ))
+fviz_pca_var(acp,axes=c(1,3))
+fviz_pca_ind(acp,col.ind="contrib",label="none",gradient.cols = c("white", "#2E9FDF", "#FC4E07" ),axes=c(1,3))
+```
+
+Même graphe en coloriant selon le dépassement de seuil.
+
+```{r}
+fviz_pca_ind(acp, label="none", habillage=1)
+```
+
+L'objectif est donc de définir une surface séparant les deux classes.
+
+**Question** Une discrimination linéaire (hyperplan) semble-t-elle possible ?
+
+### Clustering par K-means
+
+Ce n'est pas utile ici mais une classification non supervisée est facile à obtenir. Par exemple en 2 classes, par l'algorithme des $K$-means. Donne-t-elle la même information ?
+
+```{r}
+km.ozone <- kmeans(ozone[, c(3:4, 6:10)], centers = 2)
+
+# Représentation dans les coordonnées de l'acp
+acp2 <- PCA(cbind(clus = as.factor(km.ozone$cluster),
+          ozone[, c(11, 3:4, 6:10)]), scale.unit = TRUE,
+          graph = FALSE, quali.sup = 1:2, ncp = 7)
+fviz_pca_ind(acp2, label="none", habillage="clus")
+```
+
+## Protocole de comparaison
+
+### Stratégie
+
+La recherche d'une meilleure méthode de prévision suit le protocole suivant.
+
+1.  Étapes descriptives préliminaires uni- et multi-dimensionnelle visant à repérer les incohérences, les variables non significatives ou de distribution exotique, les individus non concernés ou atypiques... et à étudier les structures des données. Ce peut être aussi la longue étape de construction de variables, attributs ou features spécifiques des données.
+2.  Procéder à un tirage aléatoire d'un **échantillon test** qui ne sera utilisé que lors de la **dernière étape** de comparaison des méthodes.
+3.  La partie restante est l'**échantillon d'apprentissage** pour l'estimation des paramètres des modèles.
+4.  Pour chacune des méthodes, optimiser la complexité des modèles en minimisant une estimation "sans biais" de l'erreur de prévision, par exemple par validation croisée :
+
+-   Variables et interactions à prendre en compte dans la régression linéaire ou logistique;
+-   Variables et méthode pour l'analyse discriminante;
+-   Nombre de feuilles dans l'arbre de régression ou de classification;
+-   Architecture (nombre de neurones, pénalisation) du perceptron;
+-   Algorithme d'agrégation,
+-   Noyau et pénalisation des SVMs.
+
+5.  Comparaison des qualités de prévision sur la base du taux de mal classés pour le seul échantillon test qui est resté à l'écart de tout effort ou "acharnement" pour l'optimisation des modèles.
+
+### Remarques:
+
+-   En cas d'échantillon relativement "petit" il est recommandé d'itérer la procédure de découpage apprentissage / test, afin de réduire la variance (moyenne) des estimations des erreurs de prévision.
+
+**Question** Comment appelle-t-on cette procédure spécifique de validation croisée ?
+
+-   Attention : ne pas "tricher" en modifiant le modèle obtenu lors de l'étape précédente afin d'améliorer le résultat sur l'échantillon test !
+-   Le critère utilisé dépend du problème : erreur quadratique, taux de mauvais classement, entropie, AUC (aire sous la courbe ROC), indice de Pierce, log loss function...
+
+### Extraction des échantillons
+
+Les commandes ci-dessous réalisent l'extraction du sous-ensemble des données d'apprentissage et de test.
+
+Utilisez trois chiffres au hasard, et **remplacez** "111" ci-dessous, comme initialisation du générateur de nombres aléatoires. Attention, chaque participant tire un échantillon différent ; il est donc "normal" de ne pas obtenir les mêmes modèles, les mêmes résultats !
+
+```{r}
+set.seed(111) # initialisation du générateur
+# Extraction des échantillons
+test.ratio <- .2   # part de l'échantillon test
+npop <- nrow(ozone) # nombre de lignes dans les données
+nvar <- ncol(ozone) # nombre de colonnes
+# taille de l'échantillon test
+ntest <- ceiling(npop * test.ratio) 
+# indices de l'échantillon test
+testi <- sample(1:npop, ntest)
+# indices de l'échantillon d'apprentissage
+appri <- setdiff(1:npop, testi) 
+```
+
+Construction des échantillons pour la régression : prévision de la concentration en ozone.
+
+```{r}
+# construction de l'échantillon d'apprentissage
+datappr <- ozone[appri, -11] 
+# construction de l'échantillon test
+datestr <- ozone[testi, -11] 
+# vérification
+str(datappr)
+str(datestr)
+```
+
+Construction des échantillons pour la discrimination : prévision de dépassement.
+
+```{r}
+# construction de l'échantillon d'apprentissage
+datappq <- ozone[appri,-2]
+# construction de l'échantillon test 
+datestq <- ozone[testi,-2] 
+# vérification
+str(datappq)
+str(datestq)
+```
+
+**Remarque** : Nous avons ici "manuellement" fait la construction des échantillons à des fins pédagogiques. En pratique, on peut utiliser des fonctions de R qui font ce travail, en particulier la fonction `createDataPartition` de la librairie `caret`.
+
+Enfin, avant de passer aux différents algorithmes, définissons une fonction traçant le graphe des résidus avec des couleurs et des échelles fixes sur les axes.
+
+```{r}
+gplot.res <- function(x, y, titre = "titre"){
+    ggplot(data.frame(x=x, y=y),aes(x,y))+
+    geom_point(col = "blue")+xlim(0, 250)+ylim(-150, 150)+
+    ylab("Résidus")+ xlab("Valeurs prédites")+
+    ggtitle(titre)+
+    geom_hline(yintercept = 0,col="green")
+}
+```
+
+## Prévision par modèle gaussien
+
+Le premier modèle à tester est un simple modèle linéaire gaussien mais, comme certaines variables sont qualitatives, il s'agit d'une analyse de covariance. D'autre part, on s'intéresse à savoir si des interactions sont à prendre en compte. Le modèle devient alors polynomial d'ordre 2 ou quadratique.
+
+### Modèle linéaire
+
+#### Sans sélection de variables
+
+Le modèle d'*analyse de covariance* est estimé par la fonction `aov()` mieux adaptée à ce modèle.
+
+```{r}
+reg.lm <-aov(O3obs ~ . , data = datappr)
+# Extraction des résidus et des valeurs ajustées de ce modèle
+res.lm <- reg.lm$residuals
+fit.lm <- reg.lm$fitted.values
+# Graphe des résidus. 
+gplot.res(fit.lm,res.lm,"ANCOVA sans sélection de variables")
+```
+
+**Question** Que dire de la distribution de ces résidus ?
+
+**Question** La forme du nuage renseigne sur les hypothèses de linéarité du modèle et d'homoscédasticité. Que dire de la validité de ce modèle ?
+
+Appréciez néanmoins sa significativité par la commande suivante.
+
+```{r}
+summary(reg.lm)
+coef(reg.lm)
+```
+
+**Question** Ce premier modèle est comparé avec celui de la seule prévision déterministe MOCAGE. Qu'en conclure ?
+
+```{r}
+# Graphe des résidus du modèle déterministe MOCAGE
+g1<-gplot.res(datappr[, "MOCAGE"],datappr[, "O3obs"]-datappr[, "MOCAGE"], "linéaire, MOCAGE seul")
+g2<-gplot.res(fit.lm, res.lm, "Linéaire, sans sélection")
+grid.arrange(g1,g2,ncol=2)
+```
+
+#### Sélection de variable par régularisation L1 (LASSO)
+
+```{r}
+library(glmnet)
+# avec des variables quantitatives seulement
+reg.lasso.quanti <- glmnet(y = datappr[, 2],x = as.matrix(datappr[, -c(1, 2, 5)]))
+# avec toutes les variables, créer d'abord la matrice d'expériences 
+# avec 'model.matrix' (penser à retirer l'intercept du modèle)
+x.mat <- model.matrix(O3obs ~ . - 1, data = datappr)
+reg.lasso <- glmnet(y = datappr$O3obs, x = x.mat)
+```
+
+```{r,echo=F,eval=F}
+plot(reg.lasso, xvar = "lambda", label = TRUE)
+legend("topright", 
+       legend = paste(1:ncol(x.mat), " - ", colnames(x.mat)))
+```
+
+```{r,echo=F}
+lam <- log(reg.lasso$lambda) %>%     #log(lambda)
+  as.data.frame() %>%
+  mutate(penalty = reg.lasso$a0 %>% names()) %>%
+  rename(lambda = ".")
+
+results <- reg.lasso$beta %>% 
+  as.matrix() %>% 
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  gather(penalty, coefficients, -rowname) %>%
+  left_join(lam)
+
+result_labels <- results %>%
+  group_by(rowname) %>%
+  filter(lambda == min(lambda)) %>%
+  ungroup() 
+
+glasso<-ggplot() +
+  geom_line(data = results, aes(lambda, coefficients, group = rowname, color = rowname), show.legend = FALSE) +
+  geom_text(data = result_labels, aes(lambda-0.001, coefficients, label = rowname, color = rowname), nudge_x = -.06, show.legend = FALSE)+xlab("log(lambda)")
+ggplotly(glasso)
+```
+
+**Question** Que fait la commande `model.matrix` ? Comment sont gérées les variables catégorielles ?
+
+```{r}
+#help(model.matrix)
+head(x.mat)
+```
+
+**Question** Que représentent les courbes ci-dessus, appelées "chemins de régularisation" ?
+
+On s'intéresse ensuite au choix du paramètre de régularisation par validation croisée :
+
+```{r}
+reg.lasso.cv <- cv.glmnet(y = datappr[, 2], x = x.mat)
+#plot(reg.lasso.cv)
+autoplot(reg.lasso.cv)
+```
+
+```{r}
+help(cv.glmnet)
+```
+
+**Question** Que représente les éléments de ce graphique ?
+
+**Question** Comment sont obtenues les valeurs de log(lambda) correspondant aux lignes verticales en pointillé ?
+
+```{r}
+# valeur estimée
+paste("CV estimate of lambda :", round(reg.lasso.cv$lambda.1se, 3))
+# modèle correspondant
+coef(reg.lasso.cv, s = "lambda.1se")
+```
+
+**Question** Combien restent-ils de coefficients non nuls ? Vérifiez sur les chemins de régularisation.
+
+```{r}
+ggplotly(glasso+
+  geom_vline(xintercept = log(reg.lasso.cv$lambda.1se),col="red",linetype="dashed"))
+```
+
+**Question** Même question en choisissant l'autre valeur de lambda retenue par glmnet, i.e. `reg.lasso.cv$lambda.min`.
+
+```{r}
+# valeur estimée
+paste("CV estimate of lambda :", round(reg.lasso.cv$lambda.min, 3))
+# modèle correspondant
+coef(reg.lasso.cv, s = "lambda.min")
+ggplotly(glasso+
+  geom_vline(xintercept = log(reg.lasso.cv$lambda.min),col="red",linetype="dashed"))
+```
+
+```{r}
+# Extraction des valeurs ajustées et des résidus
+fit.lasso <- predict(reg.lasso.cv, s = "lambda.min", newx = x.mat)
+res.lasso <- datappr$O3obs - fit.lasso
+
+fit.lasso.1se <- predict(reg.lasso.cv, s = "lambda.1se", newx = x.mat) # NEW
+res.lasso.1se <- datappr$O3obs - fit.lasso.1se 
+
+# Graphe des résidus
+g1<-gplot.res(fit.lm, res.lm, "Linéaire, sans sélection")
+g2<-gplot.res(fit.lasso, res.lasso, "Linéaire, pénalité L1, lambda min")
+g3<-gplot.res(fit.lasso.1se, res.lasso.1se, "Linéaire, pénalité L1, lambda 1se") 
+grid.arrange(g1,g2,g3,ncol=3)
+```
+
+**Question** Commentez.
+
+**Question** Calculez le critère MSE (moyenne des carrés des résidus) pour les deux modèles. Pourquoi celui obtenu par LASSO est-il moins bon ? Quel critère LASSO minimise t-il ?
+
+```{r}
+paste("Modèle linéaire sans sélection:",mean(res.lm^2))
+paste("LASSO avec lambda.min:",mean(res.lasso^2))
+paste("LASSO avec lambda.1se:",mean(res.lasso.1se^2))
+```
+
+**Question** Estimez l'erreur du modèle linéaire simple sans sélection de variables par validation croisée. Comparez avec celle du LASSO. Qu'observez-vous?
+
+```{r}
+V=10 ; nV=floor(nrow(datappr)/V)
+S=sample(1:nrow(datappr),replace=FALSE)
+error.CV = c()
+for(v in 1:V){ 
+    datappr.learn=datappr[-c(S[(nV*(v-1)):(nV*v)]),] 
+    datappr.valid=datappr[c(S[(nV*(v-1)):(nV*v)]),]
+    error.CV=c(error.CV,mean((datappr.valid$O3obs-predict(aov(O3obs ~ ., data=datappr.learn),newdata=datappr.valid))^2))
+}
+mean(error.CV)
+
+print(reg.lasso.cv)
+```
+
+### Modèle quadratique
+
+L'étude suivante met en oeuvre toutes les interactions d'ordre 2 entre les variables. Il s'agit donc d'un modèle de régression quadratique. Il est estimé avec la fonction `glm()` qui permet une sélection automatique de modèle. La méthode descendante est utilisée mais celle pas-à-pas pourrait également l'être. Ce type de procédure n'est pas implémentée en python.
+
+#### Sélection de variables par critère AIC
+
+Sélection descendante: à chaque étape, chaque modèle est comparé à tous les sous-modèles possibles obtenus par suppression d'une des interactions ou une des variables, à condition qu'elle ne soit pas présente dans une interaction. La variable sélectionnée (et supprimée) est celle qui fait décroîre le critère considéré : AIC (Akaïke Information Criterion).
+
+**Question** Quel autre critère, équivalent à AIC dans le cas gaussien et de variance résiduelle connue, est utilisé en régression linéaire ?
+
+```{r}
+# Estimation du modèle avec toutes les interactions d'ordre 2
+reg.glm <- glm(O3obs ~ .^2, data = datappr)
+# Recherche du meilleur modèle au sens 
+# du critère d'Akaïke par méthode descendante
+reg.glm.step <- step(reg.glm, direction = "backward")
+```
+
+```{r}
+# Coefficients du modèle
+anova(reg.glm.step, test = "F")
+```
+
+#### Sélection de variable par régularisation L1 (LASSO)
+
+```{r}
+# Comparer avec un modèle quadratique avec pénalité L1
+x.mat2 <- model.matrix(O3obs ~ .^2 - 1, data = datappr)
+reg.lasso2.cv <- cv.glmnet(y = datappr[, "O3obs"], x = x.mat2)
+coef(reg.lasso2.cv, s = "lambda.1se")
+```
+
+```{r}
+# Extraction des valeurs ajustées et des résidus
+fit.glm <- reg.glm.step$fitted.values
+res.glm <- reg.glm.step$residuals
+fit.lasso2 <- predict(reg.lasso2.cv, s = "lambda.min", newx = x.mat2)
+res.lasso2 <- datappr$O3obs - fit.lasso2
+
+# Graphe des résidus
+g1<-gplot.res(fit.lm, res.lm, "linéaire")
+g2<-gplot.res(fit.lasso, res.lasso, "linéaire, pénalité L1")
+g3<-gplot.res(fit.glm, res.glm, "quadratique, backward AIC")
+g4<-gplot.res(fit.lasso2, res.lasso2, "quadratique, pénalité L1")
+grid.arrange(g1,g2,g3,g4,ncol=2,nrow=2)
+```
+
+On remarque que la présence de certaines interactions ou variables sont pertinentes au sens du critère d'Akaïke mais pas significative au sens du test de Fisher. Cette présence dans le modèle pourrait être plus finement analysée en considérant une estimation de l'erreur par validation croisée. L'idée serait de retirer une à une les variables ou interactions les moins significatives pour voir comment se comporte la validation croisée. D'autre part, si la procédure pas-à-pas conduit à un modèle différent, l'estimation de l'erreur par validation croisée permet également d'optimiser le choix.
+
+Ces raffinements ne s'avèrent pas efficaces sur ces données. Le modèle obtenu par minimisation du critère AIC est conservé.
+
+### Prévision de l'échantillon test
+
+Le modèle "optimal" obtenu par la méthode descendante est utilisé pour prédire l'échantillon test et estimer ainsi, sans biais, une erreur de prévision. Deux erreurs sont estimées : la première est celle quadratique pour la régression tandis que la deuxième est issue de la matrice de confusion qui croise les dépassements de seuils prédits avec ceux effectivement observés.
+
+#### Erreur de régression
+
+```{r}
+# Calcul des prévisions pour le modèle quadratique backward AIC
+pred.glm <- predict(reg.glm.step, newdata = datestr)
+# Erreur quadratique moyenne de prévision (MSE)
+sum((pred.glm - datestr[, "O3obs"])^2) / nrow(datestr)
+```
+
+```{r}
+# Erreur quadratique par MOCAGE
+sum((datestr[,"MOCAGE"] - datestr[,"O3obs"])^2) / nrow(datestr)
+```
+
+#### Erreur de classification (matrice de confusion)
+
+```{r}
+# Matrice de confusion pour la prévision du dépassement de seuil
+table(pred.glm > 150, datestr[, "O3obs"] > 150)
+# Matrice de confusion pour la prévision du 
+# dépassement de seuil par MOCAGE
+table(datestr[, "MOCAGE"] > 150, datestr[, "O3obs"] > 150)
+```
+
+Notez ces erreurs pour les comparer avec celles obtenues par les autres méthodes par la suite. Notez l'asymétrie des erreurs.
+
+## Prévision par modèle binomial
+
+Plutôt que de prévoir la concentration puis le dépassement, on peut se poser la question de savoir s'il ne serait pas pertinent de prévoir directement la présence ou l'absence d'un dépassement. La variable à modéliser étant binaire, c'est la régression logistique qui va être employée. Comme pour la régression, différentes stratégies de choix de modèle peuvent être utilisées et comparées avant d'estimer l'erreur de prévision sur l'échantillon test.
+
+### Régression logistique sans interaction
+
+```{r}
+# estimation du modèle complet
+log.lm <- glm(DepSeuil ~. , data = datappq, family = binomial)
+# significativité des paramètres
+anova(log.lm, test = "Chisq")
+```
+
+```{r}
+# Recherche d'un modèle optimal au sens d'Akaïke
+log.lm.step <- step(log.lm, direction = "backward")
+# Modèle obtenu
+anova(log.lm.step, test = "Chisq")
+# matrice de confusion de l'échantillon d'apprentissage et erreur apparente
+table(log.lm.step$fitted.values > 0.5, datappq[, "DepSeuil"])
+```
+
+### Régression logistique avec interactions
+
+Avec autant de variables et d'interactions donc de paramètres, l'estimation du modèle complet de régression logistique rencontre des soucis et affiche des warnings car certaines probabilités trop bien ajustées (0 ou 1) provoquent des divisions par 0. Ici une procédure forward ou mieux stepwise de sélection des variables et interactions conduit à des résultats raisonnables. Une méthode avec pénalisation L1 peut aussi être utilisée.
+
+```{r}
+# régression avec le modèle minimum
+log.qm <- glm(DepSeuil ~ 1, data = datappq,family = binomial)
+# algorithme stepwise en précisant le plus grand 
+# modèle possible
+log.qm.step1 <- step(log.qm, direction = "both",
+    scope = list(lower = ~1, upper = ~(JOUR + MOCAGE + TEMPE + 
+            STATION + VentMOD + VentANG + LNO2 + LNO + SRMH2O)^2), 
+    family=binomial)
+anova(log.qm.step1, test = "Chisq")
+```
+
+### Prévision de l'échantillon test
+
+#### Matrice de confusion
+
+```{r}
+# Prévision du modèle quadratique
+pred.log <- predict(log.qm.step1, newdata = datestq, type = "response")
+# Matrice de confusion pour la prévision du 
+# dépassement de seuil
+table(pred.log > 0.5, datestq[, "DepSeuil"])
+```
+
+Comparez avec l'approche précédente. Mémorisez les résultats obtenus pour comparer avec les autres méthodes.
+
+#### Courbe ROC
+
+Il est également possible de construire une courbe ROC en association de la prévision obtenue à partir d'un modèle gaussien. En effet, la variation du seuil théorique de dépassement (150) va faire varier les proportions respectives des taux de vrais et faux positifs. Cela revient encore à faire varier le seuil d'une "proba" pour les valeurs de prévisions divisées par 300.
+
+```{r,eval=F,echo=F}
+library(ROCR)   # Librairie à charger
+roclogit <- predict(log.qm.step1, newdata = datestq, type="response")
+predlogit <- prediction(roclogit, datestq[, "DepSeuil"])
+perflogit <- performance(predlogit, "tpr", "fpr")
+# Tracé de la courbe
+plot(perflogit, col = "blue")
+
+# Calculs pour la régression
+rocglm <- pred.glm / 300
+predglm <- prediction(rocglm, datestq[, "DepSeuil"])
+perfglm <- performance(predglm, "tpr", "fpr")
+# tracé de la courbe et ajout au graphe précédent.
+plot(perfglm, col = "blue",lty=2, add = TRUE)
+```
+
+```{r,message=F,warning=F}
+library(pROC)   # Librairie à charger
+roclogit <- predict(log.qm.step1, newdata = datestq, type="response")
+objroclogit<-roc(datestq[, "DepSeuil"],roclogit)
+
+# Calculs pour la régression
+rocglm <- pred.glm / 300
+objrocglm <- roc(datestq[, "DepSeuil"],rocglm)
+
+ggroc(list(logit=objroclogit,reg=objrocglm),legacy.axes=T)+
+  xlab("False Positive Rate")+
+  ylab("True Positive Rate")
+
+```
+
+**Question** Que sont la sensibilité et la spécificité d'une courbe ROC ?
+
+Les résultats obtenus dépendent évidemment en plus de l'échantillonnage initial entre apprentissage et test. Dans le cas où les courbes se croisent, cela signifie qu'il n'y a pas de prévision uniformément meilleure de l'occurrence de dépassement. Cela dépend de la sensibilité ou de la spécificité retenue pour le modèle. Ceci souligne l'importance de la bonne définition du critère à utiliser pour le choix d'une "meilleure" méthode. Ce choix dépend directement de celui , "politique" ou "économique" de sensibilité et / ou spécificité du modèle retenu. En d'autres termes, quel taux de fausse alerte, avec des imputations économiques évidentes, est supportable au regard des dépassements non détectés et donc de la dégradation sanitaire de la population à risque ?
+
+C'est une fois ce choix arrêté que le statisticien peut opérer une comparaison des méthodes en présence.
+
+**Question** Les performances des deux approches gaussiennes et binomiales sont-elles très différentes ?
+
+**Question** Sur le graphe ci-dessus, ajoutez la courbe ROC pour le modèle déterministe MOCAGE. Qu'observez-vous ?
+
+```{r,message=F,warning=F}
+objrocMOCAGE<-roc(datestq[, "DepSeuil"],datestq$MOCAGE/300)
+ggroc(list(logit=objroclogit,reg=objrocglm,MOCAGE=objrocMOCAGE),legacy.axes=T)+
+  xlab("False Positive Rate")+
+  ylab("True Positive Rate")
+```
+
+# Episode I avec Python
+
+**Avertissement**
+
+-   Cette partie avec python complète celle en R afin de comparer les performances respectives des deux environnements: complétude des résultats et efficacité du code.
+-   Les explications sont plus sommaires dans cette partie qui est en principe exécuté après ou parallèlement à celle réalisée en R.
+-   Réfléchir aux réponses aux questions marquées **Question**
+-   Toutes les options n'ont pas été testées et certaines sont posées en **Exercice**.
+
+## Prise en compte des données
+
+Les données ont été extraites et mises en forme par le service concerné de Météo France. Elles sont décrites par les variables suivantes:
+
+-   JOUR Le type de jour ; férié (1) ou pas (0) ;
+-   O3obs La concentration d'ozone effectivement observée le lendemain à 17h locales correspondant souvent au maximum de pollution observée ;
+-   MOCAGE Prévision de cette pollution obtenue par un modèle déterministe de mécanique des fluides (équation de Navier et Stockes);
+-   TEMPE Température prévue par MétéoFrance pour le lendemain 17h ;
+-   RMH2O Rapport d'humidité ;
+-   NO2 Concentration en dioxyde d'azote ;
+-   NO Concentration en monoxyde d'azote ;
+-   STATION Lieu de l'observation : Aix-en-Provence, Rambouillet, Munchhausen, Cadarache et Plan de Cuques ;
+-   VentMOD Force du vent ;
+-   VentANG Orientation du vent.
+
+Ce sont des données "propres", sans trous, bien codées et de petites tailles. Elles présentent avant tout un caractère pédagogique.
+
+Il est choisi ici de lire les données avec la librairie `pandas` pour bénéficier de la classe DataFrame. Ce n'est pas nécessaire pour l'objectif de prévision car les variables qualitatives ainsi construites ne peuvent être utilisées pour l'interprétation des modèles obtenus dans `scikit-learn` qui ne reconnaît pas la classe DataFrame.
+
+```{python}
+import pandas as pd
+import numpy as np
+# Lecture des données
+## Charger les données ou les lire directement en précisant le chemin
+path=""
+ozone=pd.read_csv(path+"depSeuil.dat",sep=",",header=0)
+# Vérification du contenu
+ozone.head()
+```
+
+Ce qui suit permet d'affecter le bon type aux variables.
+
+```{python}
+ozone["STATION"]=pd.Categorical(ozone["STATION"],ordered=False)
+ozone["JOUR"]=pd.Categorical(ozone["JOUR"],ordered=False)
+ozone["O3obs"]=pd.DataFrame(ozone["O3obs"], dtype=float)
+ozone.dtypes
+ozone.describe()
+```
+
+## Exploration élémentaire
+
+Même si les données ne présentent pas de défauts particuliers, une étude exploratoire préliminaire est indispensable afin de s'assurer de leur bonne cohérence, proposer d'éventuelles transformations et analyser les structures de corrélations ou plus généralement de liaisons entre les variables, de groupes des individus ou observations.
+
+### Statistiques unidimensionnelles
+
+```{python}
+import matplotlib.pyplot as plt
+ozone["O3obs"].hist()
+plt.show()
+```
+
+```{python}
+ozone["MOCAGE"].hist()
+plt.show()
+```
+
+**Exercice** : Traitez ainsi toutes les variables. Ceci suggère des transformations pour une meilleure utilisation des modèles linéaires.
+
+### Transformation des variables
+
+```{python}
+from math import sqrt, log
+ozone["SRMH2O"]=ozone["RMH2O"].map(lambda x: sqrt(x))
+ozone["LNO2"]=ozone["NO2"].map(lambda x: log(x))
+ozone["LNO"]=ozone["NO"].map(lambda x: log(x))
+```
+
+**Exercice** Vérifiez l'opportunité de ces transformations (histogrammes des nouvelles variables).
+
+Retirez les variables initiales et construisez ci-dessous la variable "dépassement de seuil" pour obtenir le fichier qui sera effectivement utilisé.
+
+```{python}
+del ozone["RMH2O"]
+del ozone["NO2"]
+del ozone["NO"]
+ozone["DepSeuil"]=ozone["O3obs"].map(lambda x: x > 150)
+ozone.head()
+```
+
+### Exploration multidimensionnelle
+
+```{python}
+# scatter plot matrix des variables quantitatives
+from pandas.plotting import scatter_matrix
+scatter_matrix(ozone[["O3obs","MOCAGE","TEMPE","VentMOD","VentANG","SRMH2O","LNO2","LNO"]], alpha=0.2, figsize=(15, 15), diagonal='kde');
+plt.show()
+```
+
+**Question** Commentez les relations entre les variables prises 2 à 2.
+
+### Analyse en composantes principales
+
+```{python}
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import scale
+# réduction des variables
+X=scale(ozone[["MOCAGE","TEMPE","VentMOD","VentANG","SRMH2O","LNO2","LNO"]])
+```
+
+Tous les résultats numétriques classiques sont fournis par l'[implémentation de l'ACP]](<http://scikit-learn.org/stable/modules/decomposition.html>) avec `scikit-learn` mais des efforts sont à produire pour construire les graphiques usuels généralement automatiquement produits par des librairies dédiées comme [FactoMineR](http://factominer.free.fr/) et [factoExtra](https://cran.r-project.org/web/packages/factoextra/index.html) de R.
+
+Les commandes suivantes permettent de réaliser une analyse en composantes principales sur les seules variables quantitatives. Par ailleurs la variable à modéliser (O3obs, concentration observée) n'est pas utilisée.
+
+```{python}
+pca = PCA()
+## Estimation, calcul des composantes principales
+C = pca.fit(X).transform(X)
+## Décroissance de la variance expliquée
+plt.plot(pca.explained_variance_ratio_)
+plt.show()
+```
+
+```{python}
+## distribution des composantes principales
+plt.boxplot(C[:,0:20]);
+plt.show()
+```
+
+**Question** Commentez ces résultats: quel choix de la dimension ?
+
+**Question** Présence de valeurs atypiques.
+
+```{python}
+## Représentation des individus
+plt.figure(figsize=(5,5))
+for i, j, nom in zip(C[:,0], C[:,1], ozone["DepSeuil"]):
+    color = "red" if nom  else "blue"
+    plt.plot(i, j, "o",color=color)
+plt.axis((-4,6,-4,6));  
+plt.show()
+```
+
+```{python}
+## coordonnées et représentation des variables
+coord1=pca.components_[0]*np.sqrt(pca.explained_variance_[0])
+coord2=pca.components_[1]*np.sqrt(pca.explained_variance_[1])
+fig = plt.figure(figsize=(5,5))
+ax = fig.add_subplot(1, 1, 1)
+for i, j, nom in zip(coord1,coord2, ozone[["MOCAGE","TEMPE","VentMOD", "VentANG","SRMH2O","LNO2","LNO"]].columns):
+    plt.text(i, j, nom)
+    plt.arrow(0,0,i,j,color='black')
+plt.axis((-1.2,1.2,-1.2,1.2));
+c=plt.Circle((0,0), radius=1, color='gray', fill=False);
+ax.add_patch(c);
+plt.show()
+```
+
+**Question** Commentez la structure de corrélation des variables.
+
+**Question** L'objectif est de définir une surface séparant les deux classes. Une discrimination linéaire (hyperplan) semble-t-elle possible ?
+
+### Clustering avec Kmeans
+
+Ce n'est pas utile ici mais une classification non supervisée est facile à obtenir à titre illustratif, par exemple en 4 classes, par l'algorithme k-means:
+
+```{python}
+from sklearn.cluster  import  KMeans
+from  sklearn.metrics  import confusion_matrix
+clust=KMeans(n_clusters=4)
+clust.fit(X)
+classe=clust.labels_
+print(classe)
+## Repésentation des individus dans les coordonnées de l'acp.
+plt.figure(figsize=(10,8))
+plt.scatter(C[:,0], C[:,1], c=classe) 
+plt.show()
+```
+
+## Protocole de comparaison
+
+### Stratégie
+
+La recherche d'une meilleure méthode de prévision suit généralement le protocole suivant dont la première étape est déja réalisée.
+
+1.  Etape descriptive préliminaire uni et multidimensionnelle visant à repérer les incohérences, les variables non significatives ou de distribution exotique, les individus non concernés ou atypiques... et à étudier les structures des données. Ce peut être aussi la longue étape de construction de variables, attributs ou features spécifiques des données.
+2.  Procéder à un tirage aléatoire d'un échantillon test qui ne sera utilisé que lors de la dernière étape de comparaison des méthodes.
+3.  La partie restante est l'échantillon d'apprentissage pour l'estimation des paramètres des modèles.
+4.  Pour chacune des méthodes, optimiser la complexité des modèles en minimisant une estimation "sans biais" de l'erreur de prévision, par exemple par validation croisée.
+
+-   Variables et interactions à prendre en compte dans la régression linéaire ou logistique;
+-   variables et méthode pour l'analyse discriminante;
+-   nombre de feuilles dans l'arbre de régression ou de classification;
+-   architecture (nombre de neurones, pénalisation) du perceptron;
+-   algorithme d'agrégation, +noyau et pénalisation des SVMs.
+
+5.  Comparaison des qualités de prévision sur la base du taux de mal classés pour le seul échantillon test qui est resté à l'écart de tout effort ou "acharnement" pour l'optimisation des modèles.
+
+### Remarques
+
+-   En cas d'échantillon relativement "petit" il est recommandé d'itérer la procédure de découpage apprentissage / test (validation croisée Monte Carlo), afin de réduire la variance (moyenne) des estimations des erreurs de prévision.
+-   Attention: ne pas "tricher" en modifiant le modèle obtenu lors de l'étape précédente afin d'améliorer le résultat sur l'échantillon test !
+-   Le critère utilisé dépend du problème : erreur quadratique, taux de mauvais classement, AUC (aire sous la courbe ROC), indice de Pierce, log loss function...
+-   L'étape "choix" de la meilleure méthode peut être remplacée par une combinaisons de prévision comme c'est souvent le cas dans les soutions "gagnantes" mais lourdes du site kaggle.
+
+### Extraction des échantillons apprentissage et test
+
+Transformation des données pour l'apprentissage.
+
+**Question** Pourquoi les variables qualitatives sont-elles transformées en paquets d'indicatrices ou dummy variables ?
+
+**Question** Pourquoi le type data frame est transformé en une matrice ?
+
+```{python}
+ozone.head()
+```
+
+```{python}
+# Variables explicatives
+ozoneDum=pd.get_dummies(ozone[["JOUR","STATION"]])
+del ozoneDum["JOUR_0"]
+ozoneQuant=ozone[["MOCAGE","TEMPE","VentMOD","VentANG","SRMH2O","LNO2","LNO"]]
+dfC=pd.concat([ozoneDum,ozoneQuant],axis=1)
+dfC.head()
+```
+
+```{python}
+# variable à expliquer binaire
+Yb=ozone["DepSeuil"].map(lambda x: int(x))
+# variable à expliquer réelle
+Yr=ozone["O3obs"]
+```
+
+```{python}
+Yr.hist()
+plt.show()
+```
+
+```{python,echo=F}
+plt.close()
+```
+
+Extractions des échantillons d'apprentissage et test pour les deux types de modèles. Comme le générateur est initalisé de façon identique, ce sont les mêmes échantillons dans les deux cas.
+
+```{python}
+from sklearn.model_selection import train_test_split  
+X_train,X_test,Yb_train,Yb_test=train_test_split(dfC,Yb,test_size=200,random_state=11)
+X_train,X_test,Yr_train,Yr_test=train_test_split(dfC,Yr,test_size=200,random_state=11)
+```
+
+L'étape suivante est une étape de standardisation des données ou normalisation. Les variables sont divisées par leur écart-type. Ce n'est pas utile dans le cas d'un modèle linéaire élémentaire car la solution est identique mais indispensbale pour beaucoup d'autres méthodes non linéaires (SVM, réseaux de neurones, modèles avec pénalisation). Cette étape est donc concrètement systématiquement exécutée pour éviter des soucis.
+
+**Attention** : les mêmes paramètres (moyennes, écarts-types) estimés sur l'échantillon d'apprentissage sont utilisés pour normaliser l'échantillon test.
+
+```{python}
+from sklearn.preprocessing import StandardScaler  
+# L'algorithme ds réseaux de neurones nécessite éventuellement une normalisation 
+# des variables explicatives avec les commandes ci-dessous
+scaler = StandardScaler()  
+scaler.fit(X_train)  
+Xr_train = scaler.transform(X_train)  
+# Meme transformation sur le test
+Xr_test = scaler.transform(X_test)
+```
+
+## Prévision par modèles linéaires
+
+Les fonctions de modèles linéaires et linéaires généralisés sont limitées dans [Scikit-learn](http://scikit-learn.org/stable/supervised_learning.html#supervised-learning) et sans sorties numériques (tests) détaillées. Il est préférable d'utiliser une autre librairie [StatsModels](http://statsmodels.sourceforge.net/stable/examples/notebooks/generated/glm.html) dont les sorties sont inspirées de celles de R. Dans les deux cas, les stratégies classiques (forward, backward, stepwise) de sélection de variables par optimisation d'un critère (Cp, AIC, BIC) ne semblent pas disponibles, même si AIC et BIC sont présents dans `scikit-learn`, et le type DataFrame (package `pandas`) n'est pas reconnu.
+
+La façon efficace de procéder est donc d'introduire une [pénalisation Lasso](http://wikistat.fr/pdf/st-m-app-select.pdf) pour opérer une sélection de variables ou plutôt la sélection de variables quantitatives et d'indicatrices des modalités de celles qualitatives mais sans analyse fine des interactions comme cela est possible avec R.
+
+**Question** Quel autre type de pénalisation est aussi utilisée en régression ?
+
+**Question** Quelle est la méthode qui combine les deux ?
+
+### Comparaison préliminaire à MOCAGE
+
+A titre de comparaison, on trace la prévision de la concentration de l'échantillon test par la seule valeur du modèle Mocage ainsi que les résidus à ce modèle fonction de la valeur prédite (Mocage)
+
+```{python}
+plt.plot(X_train["MOCAGE"],Yr_train,"o")
+plt.xlabel("Mocage")
+plt.ylabel("O3 observee")
+plt.show()
+```
+
+```{python,echo=F}
+plt.close()
+```
+
+```{python}
+from sklearn.metrics import r2_score
+print("R2=",r2_score(Yr_train,X_train["MOCAGE"]))
+```
+
+```{python}
+plt.plot(X_test["MOCAGE"],Yr_test,"o")
+plt.xlabel("Mocage")
+plt.ylabel("O3 observee")
+plt.show()
+```
+
+```{python}
+plt.plot(X_test["MOCAGE"],X_test["MOCAGE"]-Yr_test,"o")
+plt.xlabel("Mocage")
+plt.ylabel("Residus")
+plt.show()
+```
+
+**Question** Commenter la qualité de ces résidus.
+
+```{python}
+# Erreur quadratique moyenne
+from sklearn.metrics import mean_squared_error
+print("MSE=",mean_squared_error(X_test["MOCAGE"],Yr_test))
+```
+
+```{python}
+# Le coefficient de détermination 
+# peut être négatif en prévision avec un mauvais modèle, 
+# est nul si la prévision est constante égale à la moyennne
+from sklearn.metrics import r2_score
+print("R2=",r2_score(Yr_test,X_test["MOCAGE"]))
+```
+
+### Modèle linéaire gaussien
+
+Comparez cette prévision déterministe (équation de Navier et Stockes) par l'adaptation statistique la plus élémentaire. Il s'agit d'une régression avec choix de modèle par régularisation avec une pénalisation lasso.
+
+**Question** Quelle est la valeur par défaut du paramètre de pénalisation Lasso ?
+
+```{python}
+from sklearn import linear_model
+regLasso = linear_model.Lasso()
+regLasso.fit(Xr_train,Yr_train)
+prev=regLasso.predict(Xr_test)
+print("MSE=",mean_squared_error(Yr_test,prev))
+```
+
+```{python}
+from sklearn.metrics import r2_score
+print("R2=",r2_score(Yr_test,prev))
+```
+
+Le paramètre de pénalisation lasso est optimisé par validation croisée.
+
+```{python}
+from sklearn.model_selection import GridSearchCV
+# grille de valeurs du paramètre alpha à optimiser
+param=[{"alpha":[0.05,0.1,0.2,0.3,0.4,0.5,1]}]
+regLasso = GridSearchCV(linear_model.Lasso(), param,cv=5,n_jobs=-1)
+regLassOpt=regLasso.fit(Xr_train, Yr_train)
+# paramètre optimal
+regLassOpt.best_params_["alpha"]
+print("Meilleur R2 = %f, Meilleur paramètre = %s" % (regLassOpt.best_score_,regLassOpt.best_params_))
+```
+
+**Question** Quelle validation croisée est exécutée ?
+
+Obtenez une prévision avec la valeur optimale de `alpha` puis calculez et tracez des résidus.
+
+```{python}
+prev=regLassOpt.predict(Xr_test)
+print("MSE=",mean_squared_error(prev,Yr_test))
+print("R2=",r2_score(Yr_test,prev))
+```
+
+```{python}
+plt.plot(prev,Yr_test,"o")
+plt.xlabel(u"O3 Prédite")
+plt.ylabel("O3 observee")
+plt.show()
+```
+
+```{python,echo=F}
+plt.close()
+```
+
+```{python}
+plt.plot(prev,Yr_test-prev,"o")
+plt.xlabel(u"Prédites")
+plt.ylabel(u"Résidus")
+plt.hlines(0,40,220)
+plt.show()
+```
+
+```{python,echo=F}
+plt.close()
+```
+
+**Question** Comparez ces résidus avec ceux précédents (mocage) et notez l'amélioration.
+
+**Question** Commentez la forme du nuage et donc la validité du modèle.
+
+L'interprétation nécessite de connaître les valeurs des coefficients du modèle alors que l'objet `regLassOpt` issu de `GridSearchCV` ne retient pas les paramètres estimés. Il faut donc le ré-estimer avec la valeur optimale du paramètre de pénalisation si l'on souhaite afficher ces coefficients.
+
+```{python}
+# Coefficients
+regLasso=linear_model.Lasso(alpha=regLassOpt.best_params_['alpha'])
+model_lasso=regLasso.fit(Xr_train,Yr_train);
+model_lasso.coef_
+```
+
+```{python}
+coef = pd.Series(model_lasso.coef_, index = X_train.columns)
+print("Lasso conserve " + str(sum(coef != 0)) + 
+      " variables et en supprime " +  str(sum(coef == 0)))
+```
+
+```{python}
+imp_coef = coef.sort_values()
+plt.rcParams['figure.figsize'] = (8.0, 10.0)
+imp_coef.plot(kind = "barh")
+plt.title(u"Coefficients du modèle lasso");
+plt.show()
+```
+
+```{python,echo=F}
+plt.close()
+```
+
+**Question** Notez les conséquences de la pénalisation; interprétez l'effet de chaque variable sur la concentration en ozone.
+
+C'est ici qu'apparaît une insuffisance de la librairie python. Il faudrait construire "à la main" ou utiliser la librairie `Statsmodels` pour afficher les statistiques des tests et p-valeurs. Même avec ces compléments, la prise en compte des interactions et de leur sélection ne sont pas prévues. De plus l'interprétation est compliquée par l'éclatement de chaque variable qualitative en paquets d'indicatrices. C'est encore compréhensible avec peu de variables mais devient rapidement inexploitable.
+
+Le graphe suivant permet d'identifier les bonnes et mauvaises prévisions de dépassement du seuil légal, ici fixé à $150\mu g$.
+
+```{python}
+plt.plot(prev,Yr_test,"o")
+plt.xlabel(u"Valeurs prédites")
+plt.ylabel(u"O3 observée")
+plt.hlines(150,50,300)
+plt.vlines(150,0,300)
+plt.show()
+```
+
+```{python,echo=F}
+plt.close()
+```
+
+```{python}
+# Dénombrement des erreurs par
+# matrice de confusion
+table=pd.crosstab(prev>150,Yr_test>150)
+print(table)
+```
+
+**Question** Observez l'asymétrie de cette matrice. A quoi est-elle due au moins en partie ?
+
+`Scikit-learn` propose d'autres procédures d'optimisation du paramètre de régularisation lasso par validation croisée en régression; `lassoCV` utilise un algorithme de coordinate descent, sans calcul de dérivée puisque la norme l1 n'est pas dérivable, tandis que `lassoLarsCV` est basée sur l'algorithme de least angle regression. Ces fonctions permettent de tracer également les chemins de régularisation. Voici l'exemple de lassoCV qui offre plus d'options.
+
+```{python}
+from sklearn.linear_model import LassoCV, LassoLarsCV
+model = LassoCV(cv=5, alphas=np.array(range(1,50,1))/20.,n_jobs=-1,random_state=13).fit(Xr_train,Yr_train)
+m_log_alphas = -np.log10(model.alphas_)
+
+plt.figure()
+plt.plot(m_log_alphas, model.mse_path_, ':');
+plt.plot(m_log_alphas, model.mse_path_.mean(axis=-1), 'k',
+         label='MSE moyen', linewidth=2);
+plt.axvline(-np.log10(model.alpha_), linestyle='--', color='k',
+            label='alpha: optimal par VC');
+plt.legend();
+plt.xlabel('-log(alpha)');
+plt.ylabel('MSE');
+plt.title('MSE de chaque validation: coordinate descent ');
+plt.show()
+```
+
+```{python,echo=F}
+plt.close()
+```
+
+**Question** Vérifiez que c'est bien la même valeur optimale que celle précédemment trouvée.
+
+Tracés des chemins de régularisation.
+
+```{python}
+from itertools import cycle
+from sklearn.linear_model import lasso_path
+alphas_lasso, coefs_lasso, _ = lasso_path(Xr_train,Yr_train, alphas=np.array(range(1,50,1))/20.,)
+
+plt.figure();
+ax = plt.gca()
+
+styles = cycle(['-', '--', '-.', ':'])
+
+neg_log_alphas_lasso = -np.log10(alphas_lasso)
+for coef_l, s in zip(coefs_lasso, styles):
+    l1 = plt.plot(neg_log_alphas_lasso, coef_l, linestyle=s,c='b')
+plt.xlabel('-Log(alpha)');
+plt.ylabel('Coefficients');
+plt.show()
+```
+
+### Régression logistique ou modèle binomial
+
+La même démarche est déroulée mais en modélisant directement la variable binaire de dépassement ou non du seuil. Il s'agit d'une régression logistique avec toujours une pénalisation Lasso pour opérer une sélection de variables.
+
+```{python}
+from sklearn.linear_model import LogisticRegression
+```
+
+```{python}
+# Optimisation du paramètre de pénalisation
+# grille de valeurs
+param=[{"C":[1,1.2,1.5,1.7,2,3,4]}]
+logit = GridSearchCV(LogisticRegression(penalty="l1",solver="liblinear"), param,cv=5,n_jobs=-1)
+logitOpt=logit.fit(Xr_train, Yb_train)  # GridSearchCV est lui même un estimateur
+# paramètre optimal
+logitOpt.best_params_["C"]
+print("Meilleur score = %f, Meilleur paramètre = %s" % (1.-logitOpt.best_score_,logitOpt.best_params_))
+```
+
+```{python}
+# erreur sur l'échantillon test
+1-logitOpt.score(Xr_test, Yb_test)
+```
+
+Le modèle "optimal" obtenu est utilisé pour prédire l'échantillon test et estimer ainsi, sans biais, une erreur de prévision.
+
+La matrice de confusion croise les dépassements de seuils prédits avec ceux effectivement observés.
+
+```{python}
+# Prévision
+y_chap = logitOpt.predict(Xr_test)
+# matrice de confusion
+table=pd.crosstab(y_chap,Yb_test)
+print(table)
+```
+
+L'interprétation du modèle est basée sur les valeurs des coefficients avec les mêmes difficultés ou restrictions que pour la régression. Attention, `GridSearch` ne retient pas les coefficients, il faut les ré-estimer.
+
+```{python}
+# Coefficients
+logitLasso=LogisticRegression(penalty="l1",C=logitOpt.best_params_['C'],
+                              solver="liblinear")
+logitCoef=logitLasso.fit(Xr_train,Yb_train).coef_
+print(logitCoef[0])
+```
+
+```{python}
+coef = pd.Series(logitCoef[0], index = X_train.columns)
+print("Lasso conserve " + str(sum(coef != 0)) + 
+      " variables et en supprime " +  str(sum(coef == 0)))
+```
+
+```{python}
+imp_coef = coef.sort_values()
+plt.rcParams['figure.figsize'] = (6.0, 6.0);
+imp_coef.plot(kind = "barh");
+plt.title(u"Coefficients du modèle lasso");
+plt.show()
+```
+
+```{python,echo=F}
+plt.close()
+```
+
+**Question** Interprétez l'effet des variables retenues.
+
+```{python}
+from sklearn.metrics import roc_curve
+probas_ = LogisticRegression(penalty="l1", solver="liblinear",
+                    C=logitOpt.best_params_['C']).fit(X_train, Yb_train).predict_proba(X_test)
+fpr, tpr, thresholds = roc_curve(Yb_test, probas_[:,1])
+plt.plot(fpr, tpr, lw=1);
+plt.xlabel('Taux de faux positifs');
+plt.ylabel('Taux de vrais positifs');
+plt.show()
+```
+
+```{python,echo=F}
+plt.close()
+```
+
+**Question** Commentez la courbe ROC à propos du choix de la valeur seuil.
