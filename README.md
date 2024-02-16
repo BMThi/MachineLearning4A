@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 ## <a href="http://www.insa-toulouse.fr/" ><img src="http://www.math.univ-toulouse.fr/~besse/Wikistat/Images/Logo_INSAvilletoulouse-RVB.png" style="float:left; max-width: 80px; display: inline" alt="INSA"/> |  [*Mathématiques Appliquées*](http://www.math.insa-toulouse.fr/fr/index.html), [`Science des Données`](http://www.math.insa-toulouse.fr/fr/enseignement.html) 
 
 # Science des Données, Apprentissage Statistique & IA
@@ -93,10 +92,3 @@ Pour chaque épisode, **suivre le cours** ou consulter les vignettes et exécute
 - [`Patrimoine INSEE`](https://github.com/wikistat/Apprentissage/tree/master/Patrim-Insee) La gestion de la relation client appliquée à des données d'enquête INSEE. Recherche d'un score d'appétence pour l'assurance vie.
 - [`Pourriels`](https://github.com/wikistat/Apprentissage/blob/master/Spam/) détection de pourriels dans une base de courriers électroniques.
 - [`NIR`](https://github.com/wikistat/Apprentissage/blob/master/NIR/) Approches utilisées en chimiométrie: modélisation et prévision à partir de mesures spectrométriques dans le proche infra-rouge: taux de sucre dans une pâte à gâteaux et taux de graisse dans des échantillons de viande.
-
-
-
-
-=======
-# MachineLearning4A
->>>>>>> upstream/main
